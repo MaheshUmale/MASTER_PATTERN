@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 # --- Added Imports for Real-Time Data Fetching ---
-from tvDatafeed import Interval, TvDatafeed
+from tvDatafeed import TvDatafeed, Interval
 # from tvDatafeed.main import TvDatafeedBadCredentialsException # Import specific exception for handling
 
 # --- Configuration Constants ---
@@ -36,6 +36,7 @@ def calculate_indicators(df):
 
     df['TR'] = calculate_tr(df)
     df['ATR'] = df['TR'].rolling(window=ATR_PERIOD).mean()
+    df['ATR_StdDev'] = df['ATR'].rolling(window=ATR_PERIOD).std()
     
     return df
 
@@ -71,12 +72,13 @@ def detect_master_pattern(df):
         # --- 1. Look for Phase 2 (Expansion/Stop-Hunt) Confirmation ---
         
         # Long Setup Check: Look for a low significantly below the MA
+        dynamic_atr = recent_atr + df['ATR_StdDev'].iloc[i-1]
         recent_low = df['Low'].iloc[max(0, i - phase_2_lookback):i].min()
-        is_expansion_low = (recent_low < (recent_ma - (recent_atr * EXPANSION_ATR_MULTIPLIER)))
+        is_expansion_low = (recent_low < (recent_ma - dynamic_atr))
         
         # Short Setup Check: Look for a high significantly above the MA
         recent_high = df['High'].iloc[max(0, i - phase_2_lookback):i].max()
-        is_expansion_high = (recent_high > (recent_ma + (recent_atr * EXPANSION_ATR_MULTIPLIER)))
+        is_expansion_high = (recent_high > (recent_ma + dynamic_atr))
         
         
         # --- 2. Look for Phase 3 (Sharp Reversal/Momentum) Confirmation ---
@@ -100,11 +102,11 @@ def detect_master_pattern(df):
         # --- Final LTF Entry Signal ---
         
         # BUY Alert: Expansion Low occurred AND sharp upward reversal confirmed (Pattern within pattern)
-        if is_expansion_low and has_buy_momentum:
+        if is_expansion_low and has_buy_momentum and df['Close'].iloc[i] > df['HTF_MA'].iloc[i]:
             df.loc[df.index[i], 'Alert_Buy_Entry'] = True
         
         # SELL Alert: Expansion High occurred AND sharp downward reversal confirmed (Pattern within pattern)
-        if is_expansion_high and has_sell_momentum:
+        if is_expansion_high and has_sell_momentum and df['Close'].iloc[i] < df['HTF_MA'].iloc[i]:
             df.loc[df.index[i], 'Alert_Sell_Entry'] = True
                 
     return df
@@ -156,14 +158,14 @@ def generate_mock_data():
     
     return data
 
-def getTVData():
+def getTVData(symbol, exchange, interval):
     """Fetches real-time OHLC data from TradingView."""
     try:
         # Initialize TvDatafeed
         tv = TvDatafeed()
         
         # Fetch NIFTY 1-minute data, last 1500 candles
-        df = tv.get_hist(symbol="TCS", exchange="NSE", interval=Interval.in_5_minute, n_bars=1500)
+        df = tv.get_hist(symbol=symbol, exchange=exchange, interval=interval, n_bars=1500)
         
         # Check if data was returned
         if df is None or df.empty:
@@ -194,7 +196,7 @@ def getTVData():
         return None
 
 
-def plot_pattern(df, buy_alerts, sell_alerts):
+def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None):
     """Plots the Close Price, Average Price (MA), and marks the alerts."""
     
     plt.figure(figsize=(14, 7))
@@ -288,30 +290,115 @@ def plot_pattern(df, buy_alerts, sell_alerts):
                          color='#10B981')
 
 
+    # --- Plot Trades ---
+    if trades:
+        for trade in trades:
+            # Entry point
+            plt.axvline(x=trade['entry_index'], color='blue', linestyle='--', alpha=0.7)
+            # Exit point
+            plt.axvline(x=trade['exit_index'], color='purple', linestyle='--', alpha=0.7)
+            # SL and TP lines
+            plt.axhline(y=trade['stop_loss'], color='red', linestyle=':', alpha=0.7)
+            plt.axhline(y=trade['take_profit'], color='green', linestyle=':', alpha=0.7)
+
     # Add labels, title, and legend
-    plt.title('Master Pattern Detection - MTFA (HTF Bias + LTF Entry)', fontsize=16)
+    plt.title(f'Master Pattern Detection for {symbol} ({interval_str})', fontsize=16)
     plt.xlabel('Candle Index', fontsize=12)
     plt.ylabel('Price', fontsize=12)
     plt.legend()
     plt.grid(True, linestyle=':', alpha=0.6)
     
-    # Show the plot
-    plt.show()
+    # Save the plot to a file
+    filename = f"{symbol}_{interval_str}.png"
+    plt.savefig(filename)
+    print(f"--- Plot saved to {filename} ---")
+    plt.close()
+
+def simulate_trades(df, risk_reward_ratio=2.0, atr_sl_multiplier=1.5):
+    """Simulates trades based on entry signals and calculates performance."""
+    trades = []
+    in_trade = False
+
+    for i in range(1, len(df)):
+        # --- TRADE EXIT LOGIC ---
+        if in_trade:
+            current_low = df['Low'].iloc[i]
+            current_high = df['High'].iloc[i]
+
+            # Check for SL/TP hit
+            if trade['type'] == 'BUY':
+                if current_low <= trade['stop_loss']:
+                    trade['exit_price'] = trade['stop_loss']
+                    trade['exit_reason'] = 'SL'
+                    in_trade = False
+                elif current_high >= trade['take_profit']:
+                    trade['exit_price'] = trade['take_profit']
+                    trade['exit_reason'] = 'TP'
+                    in_trade = False
+
+            elif trade['type'] == 'SELL':
+                if current_high >= trade['stop_loss']:
+                    trade['exit_price'] = trade['stop_loss']
+                    trade['exit_reason'] = 'SL'
+                    in_trade = False
+                elif current_low <= trade['take_profit']:
+                    trade['exit_price'] = trade['take_profit']
+                    trade['exit_reason'] = 'TP'
+                    in_trade = False
+
+            # If trade is exited, calculate P/L and add to list
+            if not in_trade:
+                trade['pnl'] = (trade['exit_price'] - trade['entry_price']) if trade['type'] == 'BUY' else (trade['entry_price'] - trade['exit_price'])
+                trade['exit_index'] = i
+                trades.append(trade)
+
+        # --- TRADE ENTRY LOGIC ---
+        if not in_trade:
+            is_buy_signal = df['Alert_Buy_Entry'].iloc[i-1]
+            is_sell_signal = df['Alert_Sell_Entry'].iloc[i-1]
+
+            entry_price = df['Open'].iloc[i]
+            atr_val = df['ATR'].iloc[i-1]
+
+            if is_buy_signal:
+                stop_loss = entry_price - (atr_val * atr_sl_multiplier)
+                take_profit = entry_price + ((entry_price - stop_loss) * risk_reward_ratio)
+                trade = {'type': 'BUY', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
+                in_trade = True
+
+            elif is_sell_signal:
+                stop_loss = entry_price + (atr_val * atr_sl_multiplier)
+                take_profit = entry_price - ((stop_loss - entry_price) * risk_reward_ratio)
+                trade = {'type': 'SELL', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
+                in_trade = True
+
+    return trades
 
 # --- Simulation and Execution ---
 
-if __name__ == "__main__":
+def run_analysis(symbol, exchange, interval):
+    """Runs the full analysis for a given symbol and interval."""
+    interval_str = interval.value # e.g., '5m'
+    print(f"\n--- Running Analysis for {symbol} ({interval_str}) ---")
     
     # 1. Get/Generate Data
-    historical_data = getTVData()
+    ltf_data = getTVData(symbol, exchange, interval)
+    htf_interval = Interval.in_15_minute
+    htf_data = getTVData(symbol, exchange, htf_interval)
     
-    if historical_data is None:
-        print("\n--- Falling back to Mock Data for demonstration. ---")
-        historical_data = generate_mock_data()
+    if ltf_data is None or htf_data is None:
+        print(f"--- No data for {symbol}, skipping. ---")
+        return
 
+    # Align HTF data to LTF
+    htf_data.set_index('Datetime', inplace=True)
+    ltf_data.set_index('Datetime', inplace=True)
+    htf_ma = htf_data['Close'].rolling(window=MA_PERIOD).mean()
+    ltf_data['HTF_MA'] = htf_ma.reindex(ltf_data.index, method='ffill')
+    ltf_data.reset_index(inplace=True)
 
     # 2. Calculate Indicators and Detect Pattern
-    analyzed_data = detect_master_pattern(historical_data.copy())
+    analyzed_data = detect_master_pattern(ltf_data.copy())
     
     # 3. Find Alerts (The start of the Green/Red Phase)
     buy_alerts = analyzed_data[analyzed_data['Alert_Buy_Entry'] == True]
@@ -357,5 +444,31 @@ if __name__ == "__main__":
     else:
         print("No Master Pattern MTFA Alerts detected in the historical data.")
 
-    # 4. Generate the Plot for Visual Confirmation
-    plot_pattern(analyzed_data, buy_alerts, sell_alerts)
+    # 4. Simulate Trades
+    trades = simulate_trades(analyzed_data)
+
+    # 5. Generate the Plot for Visual Confirmation
+    plot_pattern(analyzed_data, buy_alerts, sell_alerts, symbol, interval_str, trades)
+
+    # 6. Print Backtesting Results
+    if trades:
+        total_pnl = sum(t['pnl'] for t in trades)
+        wins = [t for t in trades if t['pnl'] > 0]
+        win_rate = (len(wins) / len(trades)) * 100 if trades else 0
+
+        print("\n--- 4. Backtesting Results ---")
+        print(f"Total Trades: {len(trades)}")
+        print(f"Win Rate: {win_rate:.2f}%")
+        print(f"Total P/L: {total_pnl:.2f}")
+
+if __name__ == "__main__":
+
+    symbols_to_run = {
+        "NSE": ["TCS", "INFY", "NIFTY", "HINDZINC", "GRANULES"],
+    }
+
+    timeframe = Interval.in_5_minute
+
+    for exchange, symbols in symbols_to_run.items():
+        for symbol in symbols:
+            run_analysis(symbol, exchange, timeframe)
