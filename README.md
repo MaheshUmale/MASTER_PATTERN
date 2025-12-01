@@ -1,3 +1,64 @@
 # MASTER_PATTERN
 
-This Python script implements a sophisticated multi-timeframe analysis (MTFA) strategy known as the "Master Pattern," which is designed to detect market reversals after a period of manipulation or "stop-hunting."Here is a detailed analysis of the code and the strategy it implements:1. The Core Strategy: The Master PatternThe strategy is based on the idea that the market moves in three repeating phases, implemented here as a multi-timeframe approach:Phase 1 (Contraction/HTF Bias): The overall market context. In this code, this phase is implied when the price is near the Average Price (200 MA).Phase 2 (Expansion/Manipulation/Stop-Hunt): The price moves aggressively away from the mean to hunt stop-loss orders. The code uses a dynamic volatility measure (ATR) to confirm this move.Phase 3 (Profit Taking/Reversal - The LTF Entry): The sharp, confirmed reversal back toward or through the mean, which is the entry signal.2. Key Indicators and ConfigurationThe script uses three main constants to define the pattern:ConstantValuePurpose in the StrategyMA_PERIOD200Calculates the 200-period Simple Moving Average (Average_Price), which acts as the Higher Time Frame (HTF) Bias.ATR_PERIOD14Calculates the 14-period Average True Range (ATR) to measure market volatility.EXPANSION_ATR_MULTIPLIER1.5The distance (in multiples of ATR) the price must be away from the 200 MA to confirm a Phase 2 (Expansion/Stop-Hunt) low or high.CONSECUTIVE_MOMENTUM_CANDLES3The number of consecutive candles that must close in the trade direction to confirm the Phase 3 Low Time Frame (LTF) Reversal Entry.3. Detection Logic (detect_master_pattern)The core logic uses a "pattern within a pattern" approach by checking two conditions simultaneously:Phase 2 Confirmation (The Setup):The script looks back over the last 10 periods (phase_2_lookback) to find the recent price extreme.Buy Setup: Checks if the recent low (recent_low) is significantly below the 200 MA, confirming a manipulative move down (is_expansion_low).Sell Setup: Checks if the recent high (recent_high) is significantly above the 200 MA, confirming a manipulative move up (is_expansion_high).Phase 3 Confirmation (The Entry Trigger):After the setup is confirmed, the script checks for a sharp reversal in the current candle (i).Buy Momentum: Confirmed by 3 consecutive candles closing higher than the previous one (has_buy_momentum).Sell Momentum: Confirmed by 3 consecutive candles closing lower than the previous one (has_sell_momentum).Final Signal:A BUY Alert is triggered only if the expansion low was confirmed AND the buy momentum is confirmed (Expansion $\to$ Reversal).A SELL Alert is triggered only if the expansion high was confirmed AND the sell momentum is confirmed (Expansion $\to$ Reversal).4. Data Handling and VisualizationData Source: The getTVData function is configured to fetch up to 1500 bars of 1-minute data for the NIFTY index using the tvDatafeed library, demonstrating its real-world capability. It includes robust error handling and a fallback to generate_mock_data if fetching fails.Plotting: The plot_pattern function clearly visualizes the analysis:HTF Bias: The Average_Price (200 MA) is plotted as a grey dashed line.Entry Signals: Buy alerts are marked with an upward green triangle (^) and Sell alerts with a downward red triangle (v).Context: The Phase 2 Low (for buy setups) or Phase 2 High (for sell setups) is also annotated with an 'P' marker to show the extreme point where the stop-hunt occurred before the reversal signal.This draft provides a strong, well-defined foundation for a trend-reversal trading strategy. Let me know if you'd like to dive deeper into optimizing the EXPANSION_ATR_MULTIPLIER or explore how to dynamically determine the phase_2_lookback period.
+This Python script implements and backtests a sophisticated multi-timeframe analysis (MTFA) strategy known as the "Master Pattern." The strategy is designed to detect and trade market reversals that occur after a period of market manipulation or "stop-hunting."
+
+## The Core Strategy: The Master Pattern
+
+The strategy is based on the idea that the market often moves in three repeating phases. This script identifies these phases to generate entry signals for trend-reversal trades.
+
+*   **Phase 1 (Contraction/HTF Bias):** The market is in a state of equilibrium, often consolidating around a long-term moving average.
+*   **Phase 2 (Expansion/Manipulation/Stop-Hunt):** The price makes a sharp, aggressive move away from the mean, designed to trigger the stop-loss orders of retail traders.
+*   **Phase 3 (Profit Taking/Reversal - The LTF Entry):** Following the stop-hunt, the price sharply reverses and begins to move back toward the mean. This reversal is the entry signal for the strategy.
+
+## Key Indicators and Refinements
+
+The script has undergone several iterations of refinement to improve its performance. The final version of the strategy incorporates the following key components:
+
+*   **Multi-Timeframe Analysis (MTFA):** The script uses a higher timeframe (15-minute) 200-period Simple Moving Average (SMA) as a trend filter for the lower timeframe (5-minute) entry signals. A trade is only taken if the price action on the lower timeframe is aligned with the trend on the higher timeframe.
+*   **Dynamic Volatility Threshold:** Instead of a fixed ATR multiplier, the strategy uses a dynamic threshold to detect the stop-hunt. This threshold is calculated by adding the rolling standard deviation of the ATR to the mean ATR. This allows the strategy to adapt to changing market volatility and identify more significant price expansions.
+*   **Three-Candle Reversal Confirmation:** The entry signal is confirmed by three consecutive candles closing in the direction of the trade, providing a more robust confirmation of the reversal.
+
+## Detection Logic (`detect_master_pattern`)
+
+The core logic combines the MTFA filter with the dynamic volatility threshold to identify high-probability reversal trades:
+
+1.  **Phase 2 Confirmation (The Setup):** The script looks for a recent price extreme that is significantly above or below the 200-period SMA on the 5-minute chart. The significance of this move is determined by the dynamic ATR threshold.
+2.  **Phase 3 Confirmation (The Entry Trigger):** After a valid setup is identified, the script waits for a three-candle confirmation of the reversal.
+3.  **MTFA Filter:** A trade is only triggered if the entry signal is aligned with the trend on the 15-minute timeframe (i.e., the price is above the 15-minute 200-period SMA for a long trade, and below it for a short trade).
+
+## Backtesting Engine
+
+The script includes a simple backtesting engine to simulate trades and evaluate the strategy's performance. The backtesting engine uses the following logic:
+
+*   **Entry:** Trades are entered on the open of the candle following the entry signal.
+*   **Stop-Loss:** An ATR-based stop-loss is placed at a multiple of the ATR from the entry price.
+*   **Take-Profit:** A fixed 2:1 risk-to-reward ratio is used to set the take-profit level.
+*   **Performance Metrics:** The backtesting engine calculates and displays the following key performance metrics for each symbol:
+    *   Total Profit/Loss (P/L)
+    *   Win Rate (%)
+    *   Total Number of Trades
+
+## Data Handling and Visualization
+
+*   **Data Source:** The script uses the `tvdatafeed` library to fetch historical data from TradingView for multiple symbols and timeframes.
+*   **Plotting:** The script generates and saves a chart for each symbol, visualizing the following:
+    *   The 5-minute closing price and 200-period SMA.
+    *   The buy and sell entry signals.
+    *   The entry, exit, stop-loss, and take-profit levels for each trade.
+
+## Installation and Usage
+
+1.  **Install Dependencies:**
+    ```bash
+    pip install pandas numpy matplotlib
+    pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+    ```
+
+2.  **Configure Symbols:**
+    Modify the `symbols_to_run` dictionary in the main execution block of the script to include the symbols you want to backtest.
+
+3.  **Run the Script:**
+    ```bash
+    python3 MasterPatternDetectAndTrade.py
+    ```
+    The script will then run the backtest for each configured symbol, print the performance metrics to the console, and save the charts as PNG files in the same directory.
