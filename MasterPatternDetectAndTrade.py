@@ -99,17 +99,41 @@ def detect_master_pattern(df):
             if is_red_streak:
                  has_sell_momentum = True
                  
+        # --- 3. Check for recent Volume Spike ---
+        has_recent_spike = df['is_volume_spike'].iloc[max(0, i - phase_2_lookback):i].any()
+
         # --- Final LTF Entry Signal ---
         
         # BUY Alert: Expansion Low occurred AND sharp upward reversal confirmed (Pattern within pattern)
-        if is_expansion_low and has_buy_momentum and df['Close'].iloc[i] > df['HTF_MA'].iloc[i]:
+        if is_expansion_low and has_buy_momentum and df['Close'].iloc[i] > df['HTF_MA'].iloc[i] and has_recent_spike:
             df.loc[df.index[i], 'Alert_Buy_Entry'] = True
         
         # SELL Alert: Expansion High occurred AND sharp downward reversal confirmed (Pattern within pattern)
-        if is_expansion_high and has_sell_momentum and df['Close'].iloc[i] < df['HTF_MA'].iloc[i]:
+        if is_expansion_high and has_sell_momentum and df['Close'].iloc[i] < df['HTF_MA'].iloc[i] and has_recent_spike:
             df.loc[df.index[i], 'Alert_Sell_Entry'] = True
                 
     return df
+
+
+def detect_volume_spikes(df, lookback_period=20, multiplier=3.0):
+    """
+    Detects significant volume spikes in the data.
+
+    A spike is defined as a candle where the volume is a certain multiplier
+    times greater than the recent average volume.
+
+    Args:
+        df (pd.DataFrame): DataFrame with a 'Volume' column.
+        lookback_period (int): The rolling window for the volume moving average.
+        multiplier (float): The threshold multiplier for detecting a spike.
+
+    Returns:
+        pd.DataFrame: The original DataFrame with an added 'is_volume_spike' column.
+    """
+    df['Volume_MA'] = df['Volume'].rolling(window=lookback_period).mean()
+    df['is_volume_spike'] = df['Volume'] > (df['Volume_MA'] * multiplier)
+    return df
+
 
 def generate_mock_data():
     """Generates mock OHLC data simulating both long and short patterns (Fallback)."""
@@ -186,7 +210,7 @@ def getTVData(symbol, exchange, interval):
         print(df.head())
         
         # Return the necessary columns, including the new 'Datetime' column
-        return df[['Datetime', 'Open', 'High', 'Low', 'Close']]
+        return df[['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume']]
     
     # except TvDatafeedBadCredentialsException:
     #     print("Error: TvDatafeed Bad Credentials. Ensure you are logged in if necessary.")
@@ -196,7 +220,7 @@ def getTVData(symbol, exchange, interval):
         return None
 
 
-def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None):
+def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None, bubble_data=None):
     """Plots the Close Price, Average Price (MA), and marks the alerts."""
     
     plt.figure(figsize=(14, 7))
@@ -301,6 +325,19 @@ def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None)
             plt.axhline(y=trade['stop_loss'], color='red', linestyle=':', alpha=0.7)
             plt.axhline(y=trade['take_profit'], color='green', linestyle=':', alpha=0.7)
 
+    # --- Plot Volume Spikes (Bubbles) ---
+    if bubble_data is not None:
+        spikes = bubble_data[bubble_data['is_volume_spike']]
+        if not spikes.empty:
+            # Map spike datetimes to the integer index of the main df
+            spike_indices = [df.index[df['Datetime'] == dt][0] for dt in spikes.index if dt in df['Datetime'].values]
+            spike_closes = [spikes.loc[dt, 'Close'] for dt in spikes.index if dt in df['Datetime'].values]
+            spike_volumes = [spikes.loc[dt, 'Volume'] for dt in spikes.index if dt in df['Datetime'].values]
+
+            if spike_indices:
+                plt.scatter(spike_indices, spike_closes, s=[v/100 for v in spike_volumes],
+                            label='Volume Spike', color='orange', alpha=0.6, zorder=10)
+
     # Add labels, title, and legend
     plt.title(f'Master Pattern Detection for {symbol} ({interval_str})', fontsize=16)
     plt.xlabel('Candle Index', fontsize=12)
@@ -314,7 +351,7 @@ def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None)
     print(f"--- Plot saved to {filename} ---")
     plt.close()
 
-def simulate_trades(df, risk_reward_ratio=2.0, atr_sl_multiplier=1.5):
+def simulate_trades(df, bubble_data, risk_reward_ratio=2.0):
     """Simulates trades based on entry signals and calculates performance."""
     trades = []
     in_trade = False
@@ -358,19 +395,26 @@ def simulate_trades(df, risk_reward_ratio=2.0, atr_sl_multiplier=1.5):
             is_sell_signal = df['Alert_Sell_Entry'].iloc[i-1]
 
             entry_price = df['Open'].iloc[i]
-            atr_val = df['ATR'].iloc[i-1]
 
             if is_buy_signal:
-                stop_loss = entry_price - (atr_val * atr_sl_multiplier)
-                take_profit = entry_price + ((entry_price - stop_loss) * risk_reward_ratio)
-                trade = {'type': 'BUY', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
-                in_trade = True
+                # Find the most recent volume spike in the bubble data
+                recent_bubble_data = bubble_data[bubble_data.index < df['Datetime'].iloc[i]]
+                last_spike = recent_bubble_data[recent_bubble_data['is_volume_spike']].tail(1)
+                if not last_spike.empty:
+                    stop_loss = last_spike['Low'].iloc[0]
+                    take_profit = entry_price + ((entry_price - stop_loss) * risk_reward_ratio)
+                    trade = {'type': 'BUY', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
+                    in_trade = True
 
             elif is_sell_signal:
-                stop_loss = entry_price + (atr_val * atr_sl_multiplier)
-                take_profit = entry_price - ((stop_loss - entry_price) * risk_reward_ratio)
-                trade = {'type': 'SELL', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
-                in_trade = True
+                # Find the most recent volume spike in the bubble data
+                recent_bubble_data = bubble_data[bubble_data.index < df['Datetime'].iloc[i]]
+                last_spike = recent_bubble_data[recent_bubble_data['is_volume_spike']].tail(1)
+                if not last_spike.empty:
+                    stop_loss = last_spike['High'].iloc[0]
+                    take_profit = entry_price - ((stop_loss - entry_price) * risk_reward_ratio)
+                    trade = {'type': 'SELL', 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit, 'entry_index': i}
+                    in_trade = True
 
     return trades
 
@@ -385,8 +429,9 @@ def run_analysis(symbol, exchange, interval):
     ltf_data = getTVData(symbol, exchange, interval)
     htf_interval = Interval.in_15_minute
     htf_data = getTVData(symbol, exchange, htf_interval)
+    bubble_data = getTVData(symbol, exchange, Interval.in_1_minute)
     
-    if ltf_data is None or htf_data is None:
+    if ltf_data is None or htf_data is None or bubble_data is None:
         print(f"--- No data for {symbol}, skipping. ---")
         return
 
@@ -397,7 +442,12 @@ def run_analysis(symbol, exchange, interval):
     ltf_data['HTF_MA'] = htf_ma.reindex(ltf_data.index, method='ffill')
     ltf_data.reset_index(inplace=True)
 
-    # 2. Calculate Indicators and Detect Pattern
+    # 2. Process bubble data and align with ltf_data
+    bubble_data = detect_volume_spikes(bubble_data)
+    bubble_data.set_index('Datetime', inplace=True)
+    ltf_data['is_volume_spike'] = bubble_data['is_volume_spike'].reindex(ltf_data.set_index('Datetime').index, method='ffill', fill_value=False)
+
+    # 3. Calculate Indicators and Detect Pattern
     analyzed_data = detect_master_pattern(ltf_data.copy())
     
     # 3. Find Alerts (The start of the Green/Red Phase)
@@ -445,10 +495,10 @@ def run_analysis(symbol, exchange, interval):
         print("No Master Pattern MTFA Alerts detected in the historical data.")
 
     # 4. Simulate Trades
-    trades = simulate_trades(analyzed_data)
+    trades = simulate_trades(analyzed_data, bubble_data)
 
     # 5. Generate the Plot for Visual Confirmation
-    plot_pattern(analyzed_data, buy_alerts, sell_alerts, symbol, interval_str, trades)
+    plot_pattern(analyzed_data, buy_alerts, sell_alerts, symbol, interval_str, trades, bubble_data)
 
     # 6. Print Backtesting Results
     if trades:
