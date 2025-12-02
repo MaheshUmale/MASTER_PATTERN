@@ -185,6 +185,78 @@ def detect_accumulation_pattern(df, range_lookback=30, volume_lookback=30, atr_m
     return df
 
 
+def detect_distribution_pattern(df, range_lookback=30, volume_lookback=30, atr_multiplier=1.5):
+    """
+    Detects the distribution pattern using a fuzzy, phase-based approach inspired by Wyckoff principles.
+
+    - Phase A: Strong up-move with high volume (buying climax).
+    - Phase B: Consolidation period with several failed upward breakouts (upthrusts) on diminishing volume.
+    - Phase C: A final, decisive breakdown from the range on high volume.
+    """
+    df['Alert_Distribution_Sell'] = False
+    # Volume_MA is likely already calculated by the accumulation function, but we ensure it exists.
+    if 'Volume_MA' not in df.columns:
+        df['Volume_MA'] = df['Volume'].rolling(window=volume_lookback).mean()
+
+    for i in range(range_lookback, len(df)):
+        # --- Phase A: Identify a Strong Up-Move ---
+        initial_window = df.iloc[i - range_lookback:i]
+        up_move_threshold = initial_window['ATR'].mean() * atr_multiplier
+
+        # Find the trough before the rise
+        trough_index = initial_window['Low'].idxmin()
+        trough_price = initial_window.loc[trough_index, 'Low']
+
+        # Find the peak after the trough
+        peak_index = initial_window.loc[trough_index:, 'High'].idxmax()
+        peak_price = initial_window.loc[peak_index, 'High']
+
+        # Was there a significant rise?
+        if (peak_price - trough_price) < up_move_threshold:
+            continue
+
+        # Was the volume elevated during the climax of the rise?
+        climax_volume = initial_window.loc[peak_index, 'Volume']
+        avg_volume_before_climax = initial_window.loc[:peak_index, 'Volume'].mean()
+        if climax_volume < avg_volume_before_climax * 1.5:
+            continue
+
+        # --- Phase B: Define the Consolidation Range ---
+        consolidation_window = df.iloc[peak_index:i]
+        if len(consolidation_window) < 10:  # Ensure a minimum consolidation period
+            continue
+
+        range_low = consolidation_window['Low'].min()
+        range_high = peak_price  # The high of the buying climax sets the range top
+
+        # --- Identify Failed Upward Breakouts (Upthrusts) ---
+        # Look for at least two thrusts above the range high on progressively lower volume
+        thrusts = consolidation_window[consolidation_window['High'] > range_high * 0.99] # Allow for minor pierces
+
+        if len(thrusts) < 2:
+            continue
+
+        # Check for diminishing volume on subsequent tests
+        volume_series = thrusts['Volume'].tolist()
+        if not volume_series[-1] < volume_series[-2] * 0.8: # Last test should have lower volume
+            continue
+
+        # Ensure the price has fallen back into the range
+        if df['Close'].iloc[i-1] > range_high:
+            continue
+
+        # --- Phase C: The Breakdown ---
+        is_breakdown = df['Close'].iloc[i] < range_low
+        is_breakdown_volume = df['Volume'].iloc[i] > df['Volume_MA'].iloc[i-1] * 2.0
+
+        if is_breakdown and is_breakdown_volume:
+            # Check for "show of weakness" - price closes significantly below the range
+            if df['Close'].iloc[i] < range_low - (consolidation_window['ATR'].mean() * 0.5):
+                df.loc[df.index[i], 'Alert_Distribution_Sell'] = True
+
+    return df
+
+
 def detect_volume_spikes(df, lookback_period=20, multiplier=3.0):
     """
     Detects significant volume spikes in the data.
@@ -290,7 +362,7 @@ def getTVData(symbol, exchange, interval):
         return None
 
 
-def plot_pattern(df, buy_alerts, sell_alerts, accumulation_buy_alerts, symbol, interval_str, trades=None, bubble_data=None):
+def plot_pattern(df, buy_alerts, sell_alerts, accumulation_buy_alerts, distribution_sell_alerts, symbol, interval_str, trades=None, bubble_data=None):
     """Plots the Close Price, Average Price (MA), and marks the alerts."""
 
     plt.figure(figsize=(14, 7))
@@ -353,6 +425,17 @@ def plot_pattern(df, buy_alerts, sell_alerts, accumulation_buy_alerts, symbol, i
                     label='Accumulation BUY Entry',
                     color='#FFD700', # Gold
                     marker='*', # Star
+                    s=200,
+                    zorder=6)
+
+    # --- Mark DISTRIBUTION SELL Alerts ---
+    if not distribution_sell_alerts.empty:
+        sell_prices = df.loc[distribution_sell_alerts.index, 'Close']
+
+        plt.scatter(distribution_sell_alerts.index, sell_prices,
+                    label='Distribution SELL Entry',
+                    color='#FF4500',  # OrangeRed
+                    marker='*',  # Star
                     s=200,
                     zorder=6)
         
@@ -531,18 +614,21 @@ def run_analysis(symbol, exchange, interval):
     # 3. Calculate Indicators and Detect Pattern
     analyzed_data = detect_master_pattern(ltf_data.copy())
     analyzed_data = detect_accumulation_pattern(analyzed_data)
+    analyzed_data = detect_distribution_pattern(analyzed_data)
 
     # 3. Find Alerts (The start of the Green/Red Phase)
     buy_alerts = analyzed_data[analyzed_data['Alert_Buy_Entry'] == True]
     sell_alerts = analyzed_data[analyzed_data['Alert_Sell_Entry'] == True]
     accumulation_buy_alerts = analyzed_data[analyzed_data['Alert_Accumulation_Buy'] == True]
+    distribution_sell_alerts = analyzed_data[analyzed_data['Alert_Distribution_Sell'] == True]
+
 
     print("\n--- 2. Analysis Complete (Last 5 Rows) ---")
     print(analyzed_data.tail())
 
     print("\n--- 3. Alert Summary (MTFA Entry) ---")
 
-    total_alerts = len(buy_alerts) + len(sell_alerts) + len(accumulation_buy_alerts)
+    total_alerts = len(buy_alerts) + len(sell_alerts) + len(accumulation_buy_alerts) + len(distribution_sell_alerts)
 
     if total_alerts > 0:
         print(f"Master Pattern MTFA Alert triggered {total_alerts} time(s).")
@@ -576,6 +662,7 @@ def run_analysis(symbol, exchange, interval):
         print_alert_details(buy_alerts, "BUY")
         print_alert_details(sell_alerts, "SELL")
         print_alert_details(accumulation_buy_alerts, "ACCUMULATION BUY")
+        print_alert_details(distribution_sell_alerts, "DISTRIBUTION SELL")
 
     else:
         print("No Master Pattern MTFA Alerts detected in the historical data.")
@@ -584,7 +671,7 @@ def run_analysis(symbol, exchange, interval):
     trades = simulate_trades(analyzed_data, bubble_data)
 
     # 5. Generate the Plot for Visual Confirmation
-    plot_pattern(analyzed_data, buy_alerts, sell_alerts, accumulation_buy_alerts, symbol, interval_str, trades, bubble_data)
+    plot_pattern(analyzed_data, buy_alerts, sell_alerts, accumulation_buy_alerts, distribution_sell_alerts, symbol, interval_str, trades, bubble_data)
 
     # 6. Print Backtesting Results
     if trades:
