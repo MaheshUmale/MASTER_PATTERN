@@ -115,75 +115,72 @@ def detect_master_pattern(df):
     return df
 
 
-def detect_accumulation_pattern(df, range_lookback=20, volume_lookback=20):
+def detect_accumulation_pattern(df, range_lookback=30, volume_lookback=30, atr_multiplier=1.5):
     """
-    Detects the accumulation pattern based on the user's description.
+    Detects the accumulation pattern using a fuzzy, phase-based approach inspired by Wyckoff principles.
 
-    1) Strong Move Down with increase in volume
-    2) price stays in RANGE
-    3) small down move Not far from range ( just trying to break) with decreasing volume, fails to break , shows seller not interested to sell at lower prices
-    4)small upmove within range , with increasing volume, still withing range shows buyer are ready to buy lower prices and increasing volume shows increasing interest
-    5) next small down move , fails to go down further with less and decreasing volume shows seller not interested,
-    6) break of this range with larger volume and any fractional down move with very small volume
+    - Phase A: Strong down-move with high volume (selling climax).
+    - Phase B: Consolidation period with several failed breakouts (tests) on diminishing volume.
+    - Phase C: A final, decisive breakout from the range on high volume.
     """
     df['Alert_Accumulation_Buy'] = False
     df['Volume_MA'] = df['Volume'].rolling(window=volume_lookback).mean()
 
     for i in range(range_lookback, len(df)):
-        # Define the lookback period for pattern detection
-        window = df.iloc[i-range_lookback:i]
+        # --- Phase A: Identify a Strong Down-Move ---
+        initial_window = df.iloc[i - range_lookback:i]
+        down_move_threshold = initial_window['ATR'].mean() * atr_multiplier
 
-        # 1. Strong Move Down with increase in volume
-        down_move_window = df.iloc[i-range_lookback-10:i-range_lookback]
-        if down_move_window.empty:
+        # Find the peak before the drop
+        peak_index = initial_window['High'].idxmax()
+        peak_price = initial_window.loc[peak_index, 'High']
+
+        # Find the trough after the peak
+        trough_index = initial_window.loc[peak_index:, 'Low'].idxmin()
+        trough_price = initial_window.loc[trough_index, 'Low']
+
+        # Was there a significant drop?
+        if (peak_price - trough_price) < down_move_threshold:
             continue
 
-        price_diff = down_move_window['Close'].iloc[-1] - down_move_window['Close'].iloc[0]
-        volume_increase = down_move_window['Volume'].iloc[-1] > down_move_window['Volume'].mean() * 1.5
-        is_strong_down_move = price_diff < 0 and abs(price_diff) > window['ATR'].mean() and volume_increase
-
-        if not is_strong_down_move:
+        # Was the volume elevated during the climax of the drop?
+        climax_volume = initial_window.loc[trough_index, 'Volume']
+        avg_volume_before_climax = initial_window.loc[:trough_index, 'Volume'].mean()
+        if climax_volume < avg_volume_before_climax * 1.5:
             continue
 
-        # 2. Price stays in RANGE
-        range_high = window['High'].max()
-        range_low = window['Low'].min()
-        is_in_range = (df['Close'].iloc[i-1] > range_low) and (df['Close'].iloc[i-1] < range_high)
-
-        if not is_in_range:
+        # --- Phase B: Define the Consolidation Range ---
+        consolidation_window = df.iloc[trough_index:i]
+        if len(consolidation_window) < 10:  # Ensure a minimum consolidation period
             continue
 
-        # 3. Small down move with decreasing volume
-        recent_low = df['Low'].iloc[i-5:i].min()
-        recent_volume = df['Volume'].iloc[i-5:i].mean()
-        is_failed_breakout = (recent_low < range_low) and (recent_low > range_low - window['ATR'].mean() * 0.5)
-        is_decreasing_volume = recent_volume < window['Volume_MA'].mean()
+        range_high = consolidation_window['High'].max()
+        range_low = trough_price  # The low of the selling climax sets the range bottom
 
-        if not (is_failed_breakout and is_decreasing_volume):
+        # --- Identify Failed Breakouts (Tests) ---
+        # Look for at least two dips below the range low on progressively lower volume
+        dips = consolidation_window[consolidation_window['Low'] < range_low * 1.01]  # Allow for minor pierces
+
+        if len(dips) < 2:
             continue
 
-        # 4. Small upmove with increasing volume
-        upmove_window = df.iloc[i-3:i]
-        is_upmove_in_range = (upmove_window['High'].max() < range_high) and (upmove_window['Low'].min() > range_low)
-        is_increasing_volume_upmove = upmove_window['Volume'].iloc[-1] > upmove_window['Volume'].mean()
-
-        if not (is_upmove_in_range and is_increasing_volume_upmove):
+        # Check for diminishing volume on subsequent tests
+        volume_series = dips['Volume'].tolist()
+        if not volume_series[-1] < volume_series[-2] * 0.8: # Last test should have lower volume
             continue
 
-        # 5. Next small down move with less and decreasing volume
-        downmove_window_2 = df.iloc[i-2:i]
-        is_downmove_failed = downmove_window_2['Low'].iloc[-1] > downmove_window_2['Low'].iloc[-2]
-        is_decreasing_volume_downmove_2 = downmove_window_2['Volume'].iloc[-1] < downmove_window_2['Volume'].mean()
-
-        if not (is_downmove_failed and is_decreasing_volume_downmove_2):
+        # Ensure the price has recovered back into the range
+        if df['Close'].iloc[i-1] < range_low:
             continue
 
-        # 6. Break of this range with larger volume
+        # --- Phase C: The Breakout ---
         is_breakout = df['Close'].iloc[i] > range_high
-        is_breakout_volume = df['Volume'].iloc[i] > window['Volume_MA'].mean() * 2
+        is_breakout_volume = df['Volume'].iloc[i] > df['Volume_MA'].iloc[i-1] * 2.0
 
         if is_breakout and is_breakout_volume:
-            df.loc[df.index[i], 'Alert_Accumulation_Buy'] = True
+            # Check for "show of strength" - price closes significantly above the range
+            if df['Close'].iloc[i] > range_high + (consolidation_window['ATR'].mean() * 0.5):
+                df.loc[df.index[i], 'Alert_Accumulation_Buy'] = True
 
     return df
 
