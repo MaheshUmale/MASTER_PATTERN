@@ -115,6 +115,79 @@ def detect_master_pattern(df):
     return df
 
 
+def detect_accumulation_pattern(df, range_lookback=20, volume_lookback=20):
+    """
+    Detects the accumulation pattern based on the user's description.
+
+    1) Strong Move Down with increase in volume
+    2) price stays in RANGE
+    3) small down move Not far from range ( just trying to break) with decreasing volume, fails to break , shows seller not interested to sell at lower prices
+    4)small upmove within range , with increasing volume, still withing range shows buyer are ready to buy lower prices and increasing volume shows increasing interest
+    5) next small down move , fails to go down further with less and decreasing volume shows seller not interested,
+    6) break of this range with larger volume and any fractional down move with very small volume
+    """
+    df['Alert_Accumulation_Buy'] = False
+    df['Volume_MA'] = df['Volume'].rolling(window=volume_lookback).mean()
+
+    for i in range(range_lookback, len(df)):
+        # Define the lookback period for pattern detection
+        window = df.iloc[i-range_lookback:i]
+
+        # 1. Strong Move Down with increase in volume
+        down_move_window = df.iloc[i-range_lookback-10:i-range_lookback]
+        if down_move_window.empty:
+            continue
+
+        price_diff = down_move_window['Close'].iloc[-1] - down_move_window['Close'].iloc[0]
+        volume_increase = down_move_window['Volume'].iloc[-1] > down_move_window['Volume'].mean() * 1.5
+        is_strong_down_move = price_diff < 0 and abs(price_diff) > window['ATR'].mean() and volume_increase
+
+        if not is_strong_down_move:
+            continue
+
+        # 2. Price stays in RANGE
+        range_high = window['High'].max()
+        range_low = window['Low'].min()
+        is_in_range = (df['Close'].iloc[i-1] > range_low) and (df['Close'].iloc[i-1] < range_high)
+
+        if not is_in_range:
+            continue
+
+        # 3. Small down move with decreasing volume
+        recent_low = df['Low'].iloc[i-5:i].min()
+        recent_volume = df['Volume'].iloc[i-5:i].mean()
+        is_failed_breakout = (recent_low < range_low) and (recent_low > range_low - window['ATR'].mean() * 0.5)
+        is_decreasing_volume = recent_volume < window['Volume_MA'].mean()
+
+        if not (is_failed_breakout and is_decreasing_volume):
+            continue
+
+        # 4. Small upmove with increasing volume
+        upmove_window = df.iloc[i-3:i]
+        is_upmove_in_range = (upmove_window['High'].max() < range_high) and (upmove_window['Low'].min() > range_low)
+        is_increasing_volume_upmove = upmove_window['Volume'].iloc[-1] > upmove_window['Volume'].mean()
+
+        if not (is_upmove_in_range and is_increasing_volume_upmove):
+            continue
+
+        # 5. Next small down move with less and decreasing volume
+        downmove_window_2 = df.iloc[i-2:i]
+        is_downmove_failed = downmove_window_2['Low'].iloc[-1] > downmove_window_2['Low'].iloc[-2]
+        is_decreasing_volume_downmove_2 = downmove_window_2['Volume'].iloc[-1] < downmove_window_2['Volume'].mean()
+
+        if not (is_downmove_failed and is_decreasing_volume_downmove_2):
+            continue
+
+        # 6. Break of this range with larger volume
+        is_breakout = df['Close'].iloc[i] > range_high
+        is_breakout_volume = df['Volume'].iloc[i] > window['Volume_MA'].mean() * 2
+
+        if is_breakout and is_breakout_volume:
+            df.loc[df.index[i], 'Alert_Accumulation_Buy'] = True
+
+    return df
+
+
 def detect_volume_spikes(df, lookback_period=20, multiplier=3.0):
     """
     Detects significant volume spikes in the data.
@@ -220,60 +293,71 @@ def getTVData(symbol, exchange, interval):
         return None
 
 
-def plot_pattern(df, buy_alerts, sell_alerts, symbol, interval_str, trades=None, bubble_data=None):
+def plot_pattern(df, buy_alerts, sell_alerts, accumulation_buy_alerts, symbol, interval_str, trades=None, bubble_data=None):
     """Plots the Close Price, Average Price (MA), and marks the alerts."""
-    
+
     plt.figure(figsize=(14, 7))
-    
+
     # Plot the Closing Price
     plt.plot(df.index, df['Close'], label='Close Price', color='#4F46E5', linewidth=1.5)
-    
+
     # Plot the Average Price (MA)
-    plt.plot(df.index, df['Average_Price'], label=f'HTF Bias ({MA_PERIOD} MA)', 
+    plt.plot(df.index, df['Average_Price'], label=f'HTF Bias ({MA_PERIOD} MA)',
              color='#9CA3AF', linestyle='--', linewidth=2)
-    
-    
+
+
     # --- Mark BUY Alerts (Green Phase Start) ---
     if not buy_alerts.empty:
         buy_prices = df.loc[buy_alerts.index, 'Close']
-        
-        plt.scatter(buy_alerts.index, buy_prices, 
-                    label='BUY Entry (LTF Reversal)', 
-                    color='#10B981', 
+
+        plt.scatter(buy_alerts.index, buy_prices,
+                    label='BUY Entry (LTF Reversal)',
+                    color='#10B981',
                     marker='^', # Upward-pointing triangle
-                    s=150,      
-                    zorder=5)   
-        
+                    s=150,
+                    zorder=5)
+
         # Annotate the first BUY alert for context
         first_buy_index = buy_alerts.index.min()
         first_buy_price = df.loc[first_buy_index, 'Close']
-        plt.annotate('LTF Buy Entry', 
-                     xy=(first_buy_index, first_buy_price), 
+        plt.annotate('LTF Buy Entry',
+                     xy=(first_buy_index, first_buy_price),
                      xytext=(first_buy_index - 150, first_buy_price + df['ATR'].iloc[-1]*3),
                      arrowprops=dict(facecolor='green', shrink=0.05, width=1.5, headwidth=8),
-                     fontsize=10, 
+                     fontsize=10,
                      color='#10B981')
 
     # --- Mark SELL Alerts (Red Phase Start) ---
     if not sell_alerts.empty:
         sell_prices = df.loc[sell_alerts.index, 'Close']
-        
-        plt.scatter(sell_alerts.index, sell_prices, 
-                    label='SELL Entry (LTF Reversal)', 
-                    color='#EF4444', 
+
+        plt.scatter(sell_alerts.index, sell_prices,
+                    label='SELL Entry (LTF Reversal)',
+                    color='#EF4444',
                     marker='v', # Downward-pointing triangle
-                    s=150,      
-                    zorder=5)   
-        
+                    s=150,
+                    zorder=5)
+
         # Annotate the first SELL alert for context
         first_sell_index = sell_alerts.index.min()
         first_sell_price = df.loc[first_sell_index, 'Close']
-        plt.annotate('LTF Sell Entry', 
-                     xy=(first_sell_index, first_sell_price), 
+        plt.annotate('LTF Sell Entry',
+                     xy=(first_sell_index, first_sell_price),
                      xytext=(first_sell_index - 150, first_sell_price - df['ATR'].iloc[-1]*3),
                      arrowprops=dict(facecolor='red', shrink=0.05, width=1.5, headwidth=8),
-                     fontsize=10, 
+                     fontsize=10,
                      color='#EF4444')
+
+    # --- Mark ACCUMULATION BUY Alerts ---
+    if not accumulation_buy_alerts.empty:
+        buy_prices = df.loc[accumulation_buy_alerts.index, 'Close']
+
+        plt.scatter(accumulation_buy_alerts.index, buy_prices,
+                    label='Accumulation BUY Entry',
+                    color='#FFD700', # Gold
+                    marker='*', # Star
+                    s=200,
+                    zorder=6)
         
     # --- Annotate Phase 2 Low/High for Visual Context (using only the last 500 bars) ---
     
@@ -449,25 +533,27 @@ def run_analysis(symbol, exchange, interval):
 
     # 3. Calculate Indicators and Detect Pattern
     analyzed_data = detect_master_pattern(ltf_data.copy())
-    
+    analyzed_data = detect_accumulation_pattern(analyzed_data)
+
     # 3. Find Alerts (The start of the Green/Red Phase)
     buy_alerts = analyzed_data[analyzed_data['Alert_Buy_Entry'] == True]
     sell_alerts = analyzed_data[analyzed_data['Alert_Sell_Entry'] == True]
-    
+    accumulation_buy_alerts = analyzed_data[analyzed_data['Alert_Accumulation_Buy'] == True]
+
     print("\n--- 2. Analysis Complete (Last 5 Rows) ---")
     print(analyzed_data.tail())
 
     print("\n--- 3. Alert Summary (MTFA Entry) ---")
-    
-    total_alerts = len(buy_alerts) + len(sell_alerts)
+
+    total_alerts = len(buy_alerts) + len(sell_alerts) + len(accumulation_buy_alerts)
 
     if total_alerts > 0:
         print(f"Master Pattern MTFA Alert triggered {total_alerts} time(s).")
-        
+
         # Helper to print alert details
         def print_alert_details(alerts, action):
             if alerts.empty: return
-            
+
             # Determine if we have a Datetime column (only present with real data)
             has_datetime = 'Datetime' in alerts.columns
 
@@ -480,8 +566,10 @@ def run_analysis(symbol, exchange, interval):
                     print(f"\n{action.upper()} ALERT TRIGGERED at Candle {index}:")
 
                 print(f"Close Price: {row['Close']:.2f}")
-                print(f"HTF Bias (MA): {row['Average_Price']:.2f}")
-                print(f"ATR Volatility: {row['ATR']:.2f}")
+                if 'Average_Price' in row:
+                    print(f"HTF Bias (MA): {row['Average_Price']:.2f}")
+                if 'ATR' in row:
+                    print(f"ATR Volatility: {row['ATR']:.2f}")
                 print(f"Action: Potential {action} opportunity based on LTF REVERSAL (Pattern within Pattern).")
                 # Only print the first alert for brevity
                 if index != alerts.index[-1]:
@@ -490,6 +578,7 @@ def run_analysis(symbol, exchange, interval):
 
         print_alert_details(buy_alerts, "BUY")
         print_alert_details(sell_alerts, "SELL")
+        print_alert_details(accumulation_buy_alerts, "ACCUMULATION BUY")
 
     else:
         print("No Master Pattern MTFA Alerts detected in the historical data.")
@@ -498,7 +587,7 @@ def run_analysis(symbol, exchange, interval):
     trades = simulate_trades(analyzed_data, bubble_data)
 
     # 5. Generate the Plot for Visual Confirmation
-    plot_pattern(analyzed_data, buy_alerts, sell_alerts, symbol, interval_str, trades, bubble_data)
+    plot_pattern(analyzed_data, buy_alerts, sell_alerts, accumulation_buy_alerts, symbol, interval_str, trades, bubble_data)
 
     # 6. Print Backtesting Results
     if trades:
